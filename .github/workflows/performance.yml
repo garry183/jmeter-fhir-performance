@@ -1,0 +1,94 @@
+name: performance
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Load profile
+        type: choice
+        options: [smoke, load, stress, spike]
+        default: load
+
+env:
+  JMETER_VERSION: 5.6.3
+  PROFILE: ${{ github.event.inputs.profile || 'smoke' }}
+
+jobs:
+  gate-selftest:
+    # Proves the threshold gate can go red before we trust its green.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m unittest discover -s tests -v
+
+  jmeter:
+    needs: gate-selftest
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      hapi:
+        image: hapiproject/hapi:v8.12.0-2
+        ports:
+          - 8080:8080
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache JMeter
+        id: cache-jmeter
+        uses: actions/cache@v4
+        with:
+          path: ~/apache-jmeter-${{ env.JMETER_VERSION }}
+          key: jmeter-${{ env.JMETER_VERSION }}
+
+      - name: Install JMeter
+        if: steps.cache-jmeter.outputs.cache-hit != 'true'
+        run: curl -fsSL "https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-${JMETER_VERSION}.tgz" | tar xz -C "$HOME"
+
+      - name: Wait for HAPI FHIR
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:8080/fhir/metadata > /dev/null; then echo "HAPI up after ~$((i * 5))s"; exit 0; fi
+            sleep 5
+          done
+          echo "HAPI FHIR did not come up in 5 minutes"; exit 1
+
+      - name: Run JMeter (${{ env.PROFILE }})
+        run: |
+          mkdir -p results
+          "$HOME/apache-jmeter-${JMETER_VERSION}/bin/jmeter" -n \
+            -t test-plans/fhir-patient-journey.jmx \
+            -q "profiles/${PROFILE}.properties" \
+            -Jprotocol=http -Jhost=localhost -Jport=8080 -JbasePath=/fhir \
+            -l results/results.jtl -j results/jmeter.log \
+            -e -o results/report
+
+      - name: Threshold gate
+        run: |
+          echo "## JMeter ${PROFILE} run" >> "$GITHUB_STEP_SUMMARY"
+          python scripts/check_thresholds.py \
+            --stats results/report/statistics.json \
+            --thresholds scripts/thresholds.json \
+            --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jmeter-${{ env.PROFILE }}-report
+          path: results/
+          retention-days: 14

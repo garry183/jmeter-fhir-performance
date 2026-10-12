@@ -1,0 +1,13 @@
+{
+  "maxErrorPct": 1.0,
+  "minSamples": 20,
+  "p95Ms": {
+    "TX01 Register patient": 1500,
+    "TX02 Read patient": 800,
+    "TX03 Update patient": 1500,
+    "TX04 Search patients by family name": 1500,
+    "TX05 Record heart-rate observation": 1500,
+    "TX06 Read patient vitals history": 1500,
+    "TX07 Clean up test data": 2500
+  }
+}
